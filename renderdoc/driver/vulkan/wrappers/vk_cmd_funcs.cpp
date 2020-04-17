@@ -3607,10 +3607,48 @@ bool WrappedVulkan::Serialise_vkCmdExecuteCommands(SerialiserType &ser, VkComman
                    ToStr(GetResID(commandBuffer)).c_str());
 #endif
 
-          if(!rerecordedCmds.empty())
-            ObjDisp(commandBuffer)
+          if (!rerecordedCmds.empty())
+          {
+            if (m_DrawcallCallback && m_DrawcallCallback->SplitSecondary())
+            {
+              DrawcallUse use(m_CurChunkOffset, 0);
+              auto it = std::lower_bound(m_DrawcallUses.begin(), m_DrawcallUses.end(), use);
+              if (it != m_DrawcallUses.end())
+              {
+                //uint32_t baseEventID = it->eventId;
+                uint32_t eventId = it->eventId + 2;
+
+                for (uint32_t i = 0; i < (uint32_t)rerecordedCmds.size(); i++)
+                {
+                  //DrawFlags drawFlags = DrawFlags::Execute;
+                  ResourceId cmd = GetResourceManager()->GetOriginalID(GetResID(pCommandBuffers[i]));
+                  BakedCmdBufferInfo &info = m_BakedCmdBufferInfo[cmd];
+                  if (info.draw && info.draw->children.size() > 0)
+                  {
+                    const VulkanDrawcallTreeNode& firstDraw = info.draw->children[0];
+                    uint32_t thisEventId = eventId + firstDraw.draw.eventId;
+                    m_DrawcallCallback->SpecialPreCallback(thisEventId, commandBuffer);
+                    ObjDisp(commandBuffer)
+                      ->CmdExecuteCommands(Unwrap(commandBuffer), 1, &rerecordedCmds[i]);
+                    RDCLOG("u", firstDraw.draw.eventId);
+                    m_DrawcallCallback->SpecialPostCallback(thisEventId, commandBuffer);
+                  }
+                  else
+                  {
+                    ObjDisp(commandBuffer)
+                      ->CmdExecuteCommands(Unwrap(commandBuffer), 1, &rerecordedCmds[i]);
+                  }
+
+                  eventId += 2 + m_BakedCmdBufferInfo[cmd].eventCount;
+                }
+              }
+            }
+            else {
+              ObjDisp(commandBuffer)
                 ->CmdExecuteCommands(Unwrap(commandBuffer), (uint32_t)rerecordedCmds.size(),
-                                     rerecordedCmds.data());
+                  rerecordedCmds.data());
+            }
+          }
         }
       }
     }

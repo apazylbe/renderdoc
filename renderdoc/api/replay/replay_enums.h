@@ -4123,6 +4123,7 @@ enum class DrawFlags : uint32_t
   Resolve = 0x0400,
   GenMips = 0x0800,
   PassBoundary = 0x1000,
+  Execute = 0x2000,
 
   // flags
   Indexed = 0x010000,

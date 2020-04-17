@@ -237,6 +237,11 @@ struct VulkanDrawcallCallback
   // callbacks above for the first EID, then call this function for the others
   // to indicate that they are the same.
   virtual void AliasEvent(uint32_t primary, uint32_t alias) = 0;
+
+  virtual bool SplitSecondary() { return false; }
+
+  virtual void SpecialPreCallback(uint32_t eid, VkCommandBuffer cmd) {}
+  virtual bool SpecialPostCallback(uint32_t eid, VkCommandBuffer cmd) { return false; }
 };
 
 class WrappedVulkan : public IFrameCapturer
@@ -923,6 +928,14 @@ public:
   const InstanceDeviceInfo &GetExtensions(VkResourceRecord *record) const
   {
     return record ? *record->instDevInfo : m_EnabledExtensions;
+  }
+
+  bool IsPrimary()
+  {
+    RDCASSERT(m_LastCmdBufferID != ResourceId());
+    auto it = m_BakedCmdBufferInfo.find(m_LastCmdBufferID);
+    RDCASSERT(it != m_BakedCmdBufferInfo.end());
+    return it->second.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   }
 
   VulkanRenderState &GetCmdRenderState()

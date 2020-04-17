@@ -696,8 +696,26 @@ struct VulkanOcclusionAndStencilCallback : public VulkanPixelHistoryCallback
     auto it = m_Events.find(eid);
     if(it == m_Events.end())
       return;
-    EventUsage event = it->second;
     VulkanRenderState prevState = m_pDriver->GetCmdRenderState();
+    VulkanRenderState &pipestate = m_pDriver->GetCmdRenderState();
+    const VulkanCreationInfo::Pipeline &p =
+      m_pDriver->GetDebugManager()->GetPipelineInfo(pipestate.graphics.pipeline);
+    if (!m_pDriver->IsPrimary())
+    {
+      // Bind a different pipeline
+      VkPipeline pipe = GetPipelineReplacementSecondary(eid, prevState.graphics.pipeline);
+      if (p.dynamicStates[VkDynamicViewport])
+        for (uint32_t i = 0; i < pipestate.views.size(); i++)
+          ScissorToPixel(pipestate.views[i], pipestate.scissors[i]);
+      pipestate.graphics.pipeline = GetResID(pipe);
+      ReplayDraw(cmd, m_OcclusionQueries.size(), eid, true, true);
+      m_OcclusionQueries.insert(
+        std::pair<uint32_t, uint32_t>(eid, (uint32_t)m_OcclusionQueries.size()));
+      m_pDriver->GetCmdRenderState() = prevState;
+      return;
+    }
+
+    EventUsage event = it->second;
 
     // TODO: handle secondary command buffers.
     // TODO: can't end renderpass if we are not on the last subpass.
@@ -718,12 +736,11 @@ struct VulkanOcclusionAndStencilCallback : public VulkanPixelHistoryCallback
 
     CopyPixel(m_Image, m_Format, depthImage, depthFormat, cmd, storeOffset);
 
-    VulkanRenderState &pipestate = m_pDriver->GetCmdRenderState();
+    
     ResourceId prevRenderpass = pipestate.renderPass;
     ResourceId prevFramebuffer = pipestate.GetFramebuffer();
     rdcarray<ResourceId> prevFBattachments = pipestate.GetFramebufferAttachments();
-    const VulkanCreationInfo::Pipeline &p =
-        m_pDriver->GetDebugManager()->GetPipelineInfo(pipestate.graphics.pipeline);
+    
     uint32_t prevSubpass = pipestate.subpass;
 
     {
@@ -803,6 +820,10 @@ struct VulkanOcclusionAndStencilCallback : public VulkanPixelHistoryCallback
   {
     if(m_Events.find(eid) == m_Events.end())
       return false;
+    if (!m_pDriver->IsPrimary())
+    {
+      return false;
+    }
 
     m_pDriver->GetCmdRenderState().EndRenderPass(cmd);
 
@@ -832,6 +853,31 @@ struct VulkanOcclusionAndStencilCallback : public VulkanPixelHistoryCallback
   void PostRedraw(uint32_t eid, VkCommandBuffer cmd)
   {
     // nothing to do
+  }
+
+  void SpecialPreCallback(uint32_t baseEventId, VkCommandBuffer cmd)
+  {
+    // check if a renderpass is active 
+    // this is a secondary command buffer
+    // TODO: check if it is interesting
+    m_pDriver->GetCmdRenderState().EndRenderPass(cmd);
+
+    // Copy 
+    size_t storeOffset = m_EventIndices.size() * sizeof(EventInfo);
+    CopyPixel(m_Image, m_Format, VK_NULL_HANDLE, VK_FORMAT_UNDEFINED, cmd, storeOffset);
+
+    m_pDriver->GetCmdRenderState().BeginRenderPassAndApplyState(m_pDriver, cmd, VulkanRenderState::BindGraphics);
+  }
+
+  bool SpecialPostCallback(uint32_t baseEventId, VkCommandBuffer cmd)
+  {
+    m_pDriver->GetCmdRenderState().EndRenderPass(cmd);
+    size_t storeOffset = m_EventIndices.size() * sizeof(EventInfo);
+    CopyPixel(m_Image, m_Format, VK_NULL_HANDLE, VK_FORMAT_UNDEFINED, cmd,
+      storeOffset + offsetof(struct EventInfo, postmod));
+    m_EventIndices.insert(std::make_pair(baseEventId, m_EventIndices.size()));
+    m_pDriver->GetCmdRenderState().BeginRenderPassAndApplyState(m_pDriver, cmd, VulkanRenderState::BindGraphics);
+    return false;
   }
 
   void PreDispatch(uint32_t eid, VkCommandBuffer cmd)
@@ -871,11 +917,15 @@ struct VulkanOcclusionAndStencilCallback : public VulkanPixelHistoryCallback
     return ret;
   }
 
+  bool SplitSecondary() {
+    return true;
+  }
+
   void PostRemisc(uint32_t eid, DrawFlags flags, VkCommandBuffer cmd) {}
   void PreEndCommandBuffer(VkCommandBuffer cmd) {}
   void AliasEvent(uint32_t primary, uint32_t alias)
   {
-    // TODO: handle aliased events.
+    RDCWARN("Aliased event %u, %u", primary, alias);
   }
 
   void FetchOcclusionResults()
@@ -904,7 +954,10 @@ struct VulkanOcclusionAndStencilCallback : public VulkanPixelHistoryCallback
   size_t GetEventIndex(uint32_t eventId)
   {
     auto it = m_EventIndices.find(eventId);
-    RDCASSERT(it != m_EventIndices.end());
+    if (it == m_EventIndices.end())
+    {
+      return 0;
+    }
     return it->second;
   }
 
@@ -943,8 +996,11 @@ private:
                   bool clear = false)
   {
     const DrawcallDescription *drawcall = m_pDriver->GetDrawcall(eventId);
-    m_pDriver->GetCmdRenderState().BeginRenderPassAndApplyState(m_pDriver, cmd,
-                                                                VulkanRenderState::BindGraphics);
+    if (m_pDriver->GetCmdRenderState().renderPass != ResourceId())
+      m_pDriver->GetCmdRenderState().BeginRenderPassAndApplyState(m_pDriver, cmd,
+        VulkanRenderState::BindGraphics);
+    else
+      m_pDriver->GetCmdRenderState().BindPipeline(m_pDriver, cmd, VulkanRenderState::BindGraphics, true);
 
     if(clear)
     {
@@ -974,7 +1030,31 @@ private:
     if(doQuery)
       ObjDisp(cmd)->CmdEndQuery(Unwrap(cmd), m_OcclusionPool, (uint32_t)eventIndex);
 
-    m_pDriver->GetCmdRenderState().EndRenderPass(cmd);
+    if (m_pDriver->GetCmdRenderState().renderPass != ResourceId())
+      m_pDriver->GetCmdRenderState().EndRenderPass(cmd);
+  }
+
+  VkPipeline GetPipelineReplacementSecondary(uint32_t eid, ResourceId pipeline)
+  {
+    VkGraphicsPipelineCreateInfo pipeCreateInfo = {};
+    rdcarray<VkPipelineShaderStageCreateInfo> stages;
+    MakeAllPassIncrementStencilPipelineCI(eid, pipeline, pipeCreateInfo, stages);
+    {
+      // We just need to determine if something attempted to write to pixel.
+      // Disable actual color modifications.
+      VkPipelineColorBlendStateCreateInfo *cbs =
+        (VkPipelineColorBlendStateCreateInfo *)pipeCreateInfo.pColorBlendState;
+      VkPipelineColorBlendAttachmentState *atts =
+        (VkPipelineColorBlendAttachmentState *)cbs->pAttachments;
+      for (uint32_t i = 0; i < cbs->attachmentCount; i++)
+        atts[i].colorWriteMask = 0;
+    }
+    VkPipeline pipe;
+    VkResult vkr = m_pDriver->vkCreateGraphicsPipelines(m_pDriver->GetDev(), VK_NULL_HANDLE, 1,
+      &pipeCreateInfo, NULL,
+      &pipe);
+    RDCASSERTEQUAL(vkr, VK_SUCCESS);
+    return pipe;
   }
 
   // GetPipelineReplacements creates pipeline replacements that disable all tests,
