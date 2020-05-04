@@ -500,7 +500,7 @@ protected:
     }
 
     // TODO: this is wrong, should take into account subpass.
-    pipeCreateInfo.subpass = 0;
+    // pipeCreateInfo.subpass = 0;
 
     stages.resize(pipeCreateInfo.stageCount);
     memcpy(stages.data(), pipeCreateInfo.pStages, stages.byteSize());
@@ -877,6 +877,13 @@ protected:
     }
   }
 
+  bool HasMultipleSubpasses()
+  {
+    const VulkanCreationInfo::RenderPass &rpInfo =
+        m_pDriver->GetDebugManager()->GetRenderPassInfo(m_pDriver->GetCmdRenderState().renderPass);
+    return (rpInfo.subpasses.size() > 1);
+  }
+
   WrappedVulkan *m_pDriver;
   PixelHistoryShaderCache *m_ShaderCache;
   PixelHistoryCallbackInfo m_CallbackInfo;
@@ -936,7 +943,7 @@ struct VulkanOcclusionCallback : public VulkanPixelHistoryCallback
 
     m_pDriver->GetCmdRenderState() = prevState;
     m_pDriver->GetCmdRenderState().BindPipeline(m_pDriver, cmd, VulkanRenderState::BindGraphics,
-                                                true);
+                                                false);
   }
 
   bool PostDraw(uint32_t eid, VkCommandBuffer cmd) { return false; }
@@ -990,7 +997,7 @@ private:
   {
     const DrawcallDescription *drawcall = m_pDriver->GetDrawcall(eventId);
     m_pDriver->GetCmdRenderState().BindPipeline(m_pDriver, cmd, VulkanRenderState::BindGraphics,
-                                                true);
+                                                false);
 
     uint32_t occlIndex = (uint32_t)m_OcclusionQueries.size();
     ObjDisp(cmd)->CmdBeginQuery(Unwrap(cmd), m_OcclusionPool, occlIndex, 0);
@@ -1064,6 +1071,12 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
   {
     if(!m_Events.contains(eid) || !m_pDriver->IsCmdPrimary())
       return;
+
+    if(HasMultipleSubpasses())
+    {
+      RDCWARN("Multiple subpasses");
+      return;
+    }
 
     // TODO: can't end renderpass if we are not on the last subpass.
     VulkanRenderState prevState = m_pDriver->GetCmdRenderState();
@@ -1163,6 +1176,12 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
   {
     if(!m_Events.contains(eid) || !m_pDriver->IsCmdPrimary())
       return false;
+
+    if(HasMultipleSubpasses())
+    {
+      RDCWARN("Multiple subpasses");
+      return false;
+    }
 
     m_pDriver->GetCmdRenderState().EndRenderPass(cmd);
 
@@ -1285,6 +1304,8 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
   bool PostMisc(uint32_t eid, DrawFlags flags, VkCommandBuffer cmd)
   {
     if(!m_Events.contains(eid))
+      return false;
+    if(HasMultipleSubpasses())
       return false;
     if(flags & DrawFlags::BeginPass)
       m_pDriver->GetCmdRenderState().EndRenderPass(cmd);
@@ -2182,7 +2203,7 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
     }
 
     // TODO: this is wrong, should take into account subpass.
-    pipeCreateInfo.subpass = 0;
+    // pipeCreateInfo.subpass = 0;
 
     stages.resize(pipeCreateInfo.stageCount);
     memcpy(stages.data(), pipeCreateInfo.pStages, stages.byteSize());
