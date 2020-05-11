@@ -93,6 +93,7 @@ struct PixelHistoryResources
 
 struct PixelHistoryCallbackInfo
 {
+  bool depthOrStencilImage;
   // Original image for which pixel history is requested.
   VkImage targetImage;
   // Information about the original target image.
@@ -655,6 +656,8 @@ protected:
         m_pDriver->GetDebugManager()->GetFramebufferInfo(fb);
     for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
     {
+      if(m_CallbackInfo.depthOrStencilImage)
+        break;
       if(m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image ==
          GetResID(subImage))
         descs[i].format = newFormat;
@@ -690,12 +693,21 @@ protected:
     const VulkanCreationInfo::Framebuffer &fbInfo =
         m_pDriver->GetDebugManager()->GetFramebufferInfo(origFb);
     rdcarray<VkImageView> atts(fbInfo.attachments.size());
+    // TODO(DS): if we are dealing with a depth stencil attachment, this should be different.
 
     for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
     {
       atts[i] = m_pDriver->GetResourceManager()->GetCurrentHandle<VkImageView>(
           fbInfo.attachments[i].createdView);
-      if(newImageView != VK_NULL_HANDLE)
+      if(newImageView == VK_NULL_HANDLE)
+        continue;
+
+      if(m_CallbackInfo.depthOrStencilImage)
+      {
+        if((int32_t)i != sub.depthstencilAttachment)
+          atts[i] = newImageView;
+      }
+      else
       {
         ResourceId img =
             m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image;
@@ -726,6 +738,10 @@ protected:
   void CopyImagePixel(VkCommandBuffer cmd, CopyPixelParams &p, size_t offset)
   {
     VkImageAspectFlags aspectFlags = 0;
+    if(!p.depthCopy && IsDepthOrStencilFormat(p.srcImageFormat))
+    {
+      p.depthCopy = true;
+    }
     if(p.depthCopy)
     {
       if(IsDepthOnlyFormat(p.srcImageFormat) || IsDepthAndStencilFormat(p.srcImageFormat))
@@ -921,13 +937,17 @@ struct VulkanOcclusionCallback : public VulkanPixelHistoryCallback
 
     uint32_t framebufferIndex = 0;
     const rdcarray<ResourceId> &atts = pipestate.GetFramebufferAttachments();
-    for(uint32_t i = 0; i < atts.size(); i++)
+    if(!m_CallbackInfo.depthOrStencilImage)
     {
-      ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
-      if(img == GetResID(m_CallbackInfo.targetImage))
+      for(uint32_t i = 0; i < atts.size(); i++)
       {
-        framebufferIndex = i;
-        break;
+        // TODO(DS): this is not the same for DS images
+        ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
+        if(img == GetResID(m_CallbackInfo.targetImage))
+        {
+          framebufferIndex = i;
+          break;
+        }
       }
     }
     VkPipeline pipe = GetPixelOcclusionPipeline(eid, prevState.graphics.pipeline, framebufferIndex);
@@ -1113,13 +1133,16 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
                                               pipestate.GetFramebuffer(), m_CallbackInfo.dsImageView);
       uint32_t framebufferIndex = 0;
       const rdcarray<ResourceId> &atts = pipestate.GetFramebufferAttachments();
-      for(uint32_t i = 0; i < atts.size(); i++)
+      if(!m_CallbackInfo.depthOrStencilImage)
       {
-        ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
-        if(img == GetResID(m_CallbackInfo.targetImage))
+        for(uint32_t i = 0; i < atts.size(); i++)
         {
-          framebufferIndex = i;
-          break;
+          ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
+          if(img == GetResID(m_CallbackInfo.targetImage))
+          {
+            framebufferIndex = i;
+            break;
+          }
         }
       }
       PipelineReplacements replacements =
@@ -1483,13 +1506,16 @@ struct TestsFailedCallback : public VulkanPixelHistoryCallback
 
     uint32_t framebufferIndex = 0;
     const rdcarray<ResourceId> &atts = pipestate.GetFramebufferAttachments();
-    for(uint32_t i = 0; i < atts.size(); i++)
+    if(!m_CallbackInfo.depthOrStencilImage)
     {
-      ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
-      if(img == GetResID(m_CallbackInfo.targetImage))
+      for(uint32_t i = 0; i < atts.size(); i++)
       {
-        framebufferIndex = i;
-        break;
+        ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
+        if(img == GetResID(m_CallbackInfo.targetImage))
+        {
+          framebufferIndex = i;
+          break;
+        }
       }
     }
 
@@ -1969,13 +1995,16 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
 
     uint32_t framebufferIndex = 0;
     const rdcarray<ResourceId> &atts = prevState.GetFramebufferAttachments();
-    for(uint32_t i = 0; i < atts.size(); i++)
+    if(!m_CallbackInfo.depthOrStencilImage)
     {
-      ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
-      if(img == GetResID(m_CallbackInfo.targetImage))
+      for(uint32_t i = 0; i < atts.size(); i++)
       {
-        framebufferIndex = i;
-        break;
+        ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
+        if(img == GetResID(m_CallbackInfo.targetImage))
+        {
+          framebufferIndex = i;
+          break;
+        }
       }
     }
 
@@ -1993,12 +2022,31 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
 
     CopyPixelParams colourCopyParams = {};
     colourCopyParams.srcImage = m_CallbackInfo.subImage;
+    colourCopyParams.srcImageFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
     // Use the layout of the image we are substituting for.
-    VkImageLayout srcImageLayout = m_pDriver->GetDebugManager()->GetImageLayout(
-        GetResID(m_CallbackInfo.targetImage), VK_IMAGE_ASPECT_COLOR_BIT,
-        m_CallbackInfo.targetSubresource.mip, m_CallbackInfo.targetSubresource.slice);
-    colourCopyParams.srcImageLayout = srcImageLayout;
-    colourCopyParams.srcImageFormat = m_CallbackInfo.targetImageFormat;
+    if(m_CallbackInfo.depthOrStencilImage)
+    {
+      // TODO: what if there is none, of what if it is not color.
+      ResourceId img = m_pDriver->GetDebugManager()
+                           ->GetImageViewInfo(m_pDriver->GetDebugManager()
+                                                  ->GetFramebufferInfo(prevState.GetFramebuffer())
+                                                  .attachments[0]
+                                                  .createdView)
+                           .image;
+
+      // Get the layout of the first framebuffer attachment.
+      VkImageLayout srcImageLayout = m_pDriver->GetDebugManager()->GetImageLayout(
+          img, VK_IMAGE_ASPECT_COLOR_BIT, m_CallbackInfo.targetSubresource.mip,
+          m_CallbackInfo.targetSubresource.slice);
+      colourCopyParams.srcImageLayout = srcImageLayout;
+    }
+    else
+    {
+      VkImageLayout srcImageLayout = m_pDriver->GetDebugManager()->GetImageLayout(
+          GetResID(m_CallbackInfo.targetImage), VK_IMAGE_ASPECT_COLOR_BIT,
+          m_CallbackInfo.targetSubresource.mip, m_CallbackInfo.targetSubresource.slice);
+      colourCopyParams.srcImageLayout = srcImageLayout;
+    }
 
     const VulkanCreationInfo::Pipeline &p =
         m_pDriver->GetDebugManager()->GetPipelineInfo(prevState.graphics.pipeline);
@@ -2883,6 +2931,9 @@ rdcarray<PixelModification> VulkanReplay::PixelHistory(rdcarray<EventUsage> even
                                                        ResourceId target, uint32_t x, uint32_t y,
                                                        const Subresource &sub, CompType typeCast)
 {
+  x = 957;
+  y = 497;
+
   if(!GetAPIProperties().pixelHistory)
   {
     VULKANNOTIMP("PixelHistory");
@@ -2941,6 +2992,7 @@ rdcarray<PixelModification> VulkanReplay::PixelHistory(rdcarray<EventUsage> even
   PixelHistoryShaderCache *shaderCache = new PixelHistoryShaderCache(m_pDriver);
 
   PixelHistoryCallbackInfo callbackInfo = {};
+  callbackInfo.depthOrStencilImage = IsDepthOrStencilFormat(imginfo.format);
   callbackInfo.targetImage = targetImage;
   callbackInfo.targetImageFormat = imginfo.format;
   callbackInfo.layers = imginfo.arrayLayers;
