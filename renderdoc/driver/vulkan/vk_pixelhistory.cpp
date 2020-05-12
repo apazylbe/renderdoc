@@ -1986,6 +1986,42 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
 
     uint32_t numFragmentsInEvent = m_EventFragments[eid];
 
+    // Find framebuffer index to replace
+    const VulkanCreationInfo::Framebuffer &fbInfo =
+      m_pDriver->GetDebugManager()->GetFramebufferInfo(state.GetFramebuffer());
+    uint32_t framebufferIndex = 0;
+    if (m_CallbackInfo.depthOrStencilImage)
+    {
+      // Find the first color attachment, if there are none, add a new one
+      for (uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+      {
+        if (!IsDepthOrStencilFormat(m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).format))
+        {
+
+        }
+
+      }
+    }
+    else {
+      // Find it
+      for (uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+      {
+        ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i]).image;
+        if (img == GetResID(m_CallbackInfo.targetImage))
+        {
+          framebufferIndex = i;
+          break;
+        }
+      }
+    }
+    for (uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+    {
+      if (m_CallbackInfo.depthOrStencilImage)
+        break;
+      if (m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image ==
+        GetResID(subImage))
+        descs[i].format = newFormat;
+    }
     VkRenderPass newRp = CreateRenderPass(state.renderPass, state.GetFramebuffer(), state.subpass,
                                           m_CallbackInfo.targetImage, VK_FORMAT_R32G32B32A32_SFLOAT);
 
@@ -2931,8 +2967,8 @@ rdcarray<PixelModification> VulkanReplay::PixelHistory(rdcarray<EventUsage> even
                                                        ResourceId target, uint32_t x, uint32_t y,
                                                        const Subresource &sub, CompType typeCast)
 {
-  x = 957;
-  y = 497;
+  //x = 957;
+  //y = 497;
 
   if(!GetAPIProperties().pixelHistory)
   {
