@@ -500,9 +500,6 @@ protected:
         atts[i].colorWriteMask = 0;
     }
 
-    // TODO: this is wrong, should take into account subpass.
-    // pipeCreateInfo.subpass = 0;
-
     stages.resize(pipeCreateInfo.stageCount);
     memcpy(stages.data(), pipeCreateInfo.pStages, stages.byteSize());
 
@@ -733,6 +730,85 @@ protected:
     RDCASSERTEQUAL(vkr, VK_SUCCESS);
     m_FbsToDestroy.push_back(framebuffer);
     return framebuffer;
+  }
+
+  int32_t GetIndex(ResourceId fb)
+  {
+    int32_t colorAttachment = -1;
+    int32_t depthAttachment = -1;
+
+    // If target image is colour:
+    // color = find the one that matches the target image to substitute
+    // depth = original depth image, or a new one at the end if none is found
+
+    // If target image is depth:
+    // color = find the first color image, or add a new one at the end
+    // depth = substitute
+
+    const VulkanCreationInfo::Framebuffer &fbInfo =
+        m_pDriver->GetDebugManager()->GetFramebufferInfo(fb);
+    for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+    {
+      ResourceId img =
+          m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image;
+      if(img == GetResID(m_CallbackInfo.targetImage))
+      {
+        colorAttachment = i;
+        break;
+      }
+    }
+
+    for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+    {
+      if(newImageView == VK_NULL_HANDLE)
+        continue;
+
+      if(m_CallbackInfo.depthOrStencilImage)
+      {
+        if((int32_t)i != sub.depthstencilAttachment)
+          atts[i] = newImageView;
+      }
+      else
+      {
+        ResourceId img =
+            m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image;
+        if(img == GetResID(m_CallbackInfo.targetImage))
+          atts[i] = newImageView;
+      }
+    }
+
+    if(m_CallbackInfo.depthOrStencilImage)
+    {
+      // Find the first color attachment, if there are none, add a new one
+      for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+      {
+        if(!IsDepthOrStencilFormat(
+               m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).format))
+        {
+        }
+      }
+    }
+    else
+    {
+      // Find it
+      for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+      {
+        ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i]).image;
+        if(img == GetResID(m_CallbackInfo.targetImage))
+        {
+          framebufferIndex = i;
+          break;
+        }
+      }
+    }
+    for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+    {
+      if(m_CallbackInfo.depthOrStencilImage)
+        break;
+      if(m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image ==
+         GetResID(subImage))
+        descs[i].format = newFormat;
+    }
   }
 
   void CopyImagePixel(VkCommandBuffer cmd, CopyPixelParams &p, size_t offset)
@@ -1988,38 +2064,38 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
 
     // Find framebuffer index to replace
     const VulkanCreationInfo::Framebuffer &fbInfo =
-      m_pDriver->GetDebugManager()->GetFramebufferInfo(state.GetFramebuffer());
+        m_pDriver->GetDebugManager()->GetFramebufferInfo(state.GetFramebuffer());
     uint32_t framebufferIndex = 0;
-    if (m_CallbackInfo.depthOrStencilImage)
+    if(m_CallbackInfo.depthOrStencilImage)
     {
       // Find the first color attachment, if there are none, add a new one
-      for (uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+      for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
       {
-        if (!IsDepthOrStencilFormat(m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).format))
+        if(!IsDepthOrStencilFormat(
+               m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).format))
         {
-
         }
-
       }
     }
-    else {
+    else
+    {
       // Find it
-      for (uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+      for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
       {
         ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i]).image;
-        if (img == GetResID(m_CallbackInfo.targetImage))
+        if(img == GetResID(m_CallbackInfo.targetImage))
         {
           framebufferIndex = i;
           break;
         }
       }
     }
-    for (uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+    for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
     {
-      if (m_CallbackInfo.depthOrStencilImage)
+      if(m_CallbackInfo.depthOrStencilImage)
         break;
-      if (m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image ==
-        GetResID(subImage))
+      if(m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image ==
+         GetResID(subImage))
         descs[i].format = newFormat;
     }
     VkRenderPass newRp = CreateRenderPass(state.renderPass, state.GetFramebuffer(), state.subpass,
@@ -2285,9 +2361,6 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
 
       ms->pSampleMask = &m_CallbackInfo.sampleMask;
     }
-
-    // TODO: this is wrong, should take into account subpass.
-    // pipeCreateInfo.subpass = 0;
 
     stages.resize(pipeCreateInfo.stageCount);
     memcpy(stages.data(), pipeCreateInfo.pStages, stages.byteSize());
@@ -2967,8 +3040,8 @@ rdcarray<PixelModification> VulkanReplay::PixelHistory(rdcarray<EventUsage> even
                                                        ResourceId target, uint32_t x, uint32_t y,
                                                        const Subresource &sub, CompType typeCast)
 {
-  //x = 957;
-  //y = 497;
+  // x = 957;
+  // y = 497;
 
   if(!GetAPIProperties().pixelHistory)
   {
