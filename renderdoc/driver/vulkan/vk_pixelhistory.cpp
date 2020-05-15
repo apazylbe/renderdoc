@@ -556,9 +556,8 @@ protected:
   // a single draw. The new renderpass also replaces the depth stencil attachment, so
   // it can be used to count the number of fragments. Optionally, the new renderpass
   // changes the format for the color image that corresponds to subImage.
-  VkRenderPass CreateRenderPass(ResourceId rp, ResourceId fb, uint32_t subpassIdx,
-                                VkImage subImage = VK_NULL_HANDLE,
-                                VkFormat newFormat = VK_FORMAT_UNDEFINED)
+  VkRenderPass CreateRenderPass(ResourceId rp, uint32_t subpassIdx,
+                                VkFormat newColorFormat = VK_FORMAT_UNDEFINED, uint32_t idx = 0)
   {
     const VulkanCreationInfo::RenderPass &rpInfo =
         m_pDriver->GetDebugManager()->GetRenderPassInfo(rp);
@@ -649,15 +648,32 @@ protected:
     subpassDesc.pDepthStencilAttachment = &dsAttachment;
 
     // If needed substitute the color attachment with the new format.
-    const VulkanCreationInfo::Framebuffer &fbInfo =
-        m_pDriver->GetDebugManager()->GetFramebufferInfo(fb);
-    for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
+    if(newColorFormat != VK_FORMAT_UNDEFINED)
     {
-      if(m_CallbackInfo.depthOrStencilImage)
-        break;
-      if(m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image ==
-         GetResID(subImage))
-        descs[i].format = newFormat;
+      if(idx < descs.size())
+      {
+        descs[idx].format = newColorFormat;
+      }
+      else
+      {
+        VkAttachmentReference attRef = {};
+        attRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attRef.attachment = idx;
+        colorAttachments.push_back(attRef);
+        subpassDesc.colorAttachmentCount = (uint32_t)colorAttachments.size();
+        subpassDesc.pColorAttachments = colorAttachments.data();
+
+        VkAttachmentDescription attDesc = {};
+        attDesc.format = newColorFormat;
+        attDesc.samples = m_CallbackInfo.samples;
+        attDesc.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attDesc.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attDesc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attDesc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attDesc.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attDesc.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        descs.push_back(attDesc);
+      }
     }
 
     VkRenderPassCreateInfo rpCreateInfo = {};
@@ -681,8 +697,8 @@ protected:
   // substitutes the depth stencil image view. If there is no depth stencil attachment,
   // it will be added. Optionally, also substitutes the original target image view.
   VkFramebuffer CreateFramebuffer(ResourceId rp, VkRenderPass newRp, uint32_t subpassIndex,
-                                  ResourceId origFb, VkImageView newDsImageView,
-                                  VkImageView newImageView = VK_NULL_HANDLE)
+                                  ResourceId origFb, VkImageView newImageView = VK_NULL_HANDLE,
+                                  uint32_t idx = 0)
   {
     const VulkanCreationInfo::RenderPass &rpInfo =
         m_pDriver->GetDebugManager()->GetRenderPassInfo(rp);
@@ -690,33 +706,29 @@ protected:
     const VulkanCreationInfo::Framebuffer &fbInfo =
         m_pDriver->GetDebugManager()->GetFramebufferInfo(origFb);
     rdcarray<VkImageView> atts(fbInfo.attachments.size());
-    // TODO(DS): if we are dealing with a depth stencil attachment, this should be different.
-
     for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
     {
       atts[i] = m_pDriver->GetResourceManager()->GetCurrentHandle<VkImageView>(
           fbInfo.attachments[i].createdView);
-      if(newImageView == VK_NULL_HANDLE)
-        continue;
-
-      if(m_CallbackInfo.depthOrStencilImage)
+    }
+    // TODO(DS): if we are dealing with a depth stencil attachment, this should be different.
+    if(newImageView != VK_NULL_HANDLE)
+    {
+      if(idx < atts.size())
       {
-        if((int32_t)i != sub.depthstencilAttachment)
-          atts[i] = newImageView;
+        atts[idx] = newImageView;
       }
       else
       {
-        ResourceId img =
-            m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image;
-        if(img == GetResID(m_CallbackInfo.targetImage))
-          atts[i] = newImageView;
+        atts.push_back(newImageView);
       }
     }
 
     if(sub.depthstencilAttachment != -1)
-      atts[sub.depthstencilAttachment] = newDsImageView;
+      atts[sub.depthstencilAttachment] = m_CallbackInfo.dsImageView;
     else
-      atts.push_back(newDsImageView);
+      atts.push_back(m_CallbackInfo.dsImageView);
+
     VkFramebufferCreateInfo fbCI = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
     fbCI.renderPass = newRp;
     fbCI.attachmentCount = (uint32_t)atts.size();
@@ -732,6 +744,7 @@ protected:
     return framebuffer;
   }
 
+  /*
   int32_t GetIndex(ResourceId fb)
   {
     int32_t colorAttachment = -1;
@@ -793,7 +806,8 @@ protected:
       // Find it
       for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
       {
-        ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i]).image;
+        ResourceId img =
+  m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i]).image;
         if(img == GetResID(m_CallbackInfo.targetImage))
         {
           framebufferIndex = i;
@@ -810,7 +824,7 @@ protected:
         descs[i].format = newFormat;
     }
   }
-
+  */
   void CopyImagePixel(VkCommandBuffer cmd, CopyPixelParams &p, size_t offset)
   {
     VkImageAspectFlags aspectFlags = 0;
@@ -1203,10 +1217,9 @@ struct VulkanColorAndStencilCallback : public VulkanPixelHistoryCallback
     uint32_t prevSubpass = pipestate.subpass;
 
     {
-      VkRenderPass newRp =
-          CreateRenderPass(pipestate.renderPass, pipestate.GetFramebuffer(), pipestate.subpass);
+      VkRenderPass newRp = CreateRenderPass(pipestate.renderPass, pipestate.subpass);
       VkFramebuffer newFb = CreateFramebuffer(pipestate.renderPass, newRp, pipestate.subpass,
-                                              pipestate.GetFramebuffer(), m_CallbackInfo.dsImageView);
+                                              pipestate.GetFramebuffer());
       uint32_t framebufferIndex = 0;
       const rdcarray<ResourceId> &atts = pipestate.GetFramebufferAttachments();
       if(!m_CallbackInfo.depthOrStencilImage)
@@ -2063,62 +2076,28 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
     uint32_t numFragmentsInEvent = m_EventFragments[eid];
 
     // Find framebuffer index to replace
-    const VulkanCreationInfo::Framebuffer &fbInfo =
-        m_pDriver->GetDebugManager()->GetFramebufferInfo(state.GetFramebuffer());
-    uint32_t framebufferIndex = 0;
-    if(m_CallbackInfo.depthOrStencilImage)
-    {
-      // Find the first color attachment, if there are none, add a new one
-      for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
-      {
-        if(!IsDepthOrStencilFormat(
-               m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).format))
-        {
-        }
-      }
-    }
-    else
-    {
-      // Find it
-      for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
-      {
-        ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i]).image;
-        if(img == GetResID(m_CallbackInfo.targetImage))
-        {
-          framebufferIndex = i;
-          break;
-        }
-      }
-    }
-    for(uint32_t i = 0; i < fbInfo.attachments.size(); i++)
-    {
-      if(m_CallbackInfo.depthOrStencilImage)
-        break;
-      if(m_pDriver->GetDebugManager()->GetImageViewInfo(fbInfo.attachments[i].createdView).image ==
-         GetResID(subImage))
-        descs[i].format = newFormat;
-    }
-    VkRenderPass newRp = CreateRenderPass(state.renderPass, state.GetFramebuffer(), state.subpass,
-                                          m_CallbackInfo.targetImage, VK_FORMAT_R32G32B32A32_SFLOAT);
-
-    VkFramebuffer newFb =
-        CreateFramebuffer(state.renderPass, newRp, state.subpass, state.GetFramebuffer(),
-                          m_CallbackInfo.dsImageView, m_CallbackInfo.subImageView);
+    // const VulkanCreationInfo::Framebuffer &fbInfo =
+    //  m_pDriver->GetDebugManager()->GetFramebufferInfo(state.GetFramebuffer());
 
     uint32_t framebufferIndex = 0;
     const rdcarray<ResourceId> &atts = prevState.GetFramebufferAttachments();
-    if(!m_CallbackInfo.depthOrStencilImage)
+    for(uint32_t i = 0; i < atts.size(); i++)
     {
-      for(uint32_t i = 0; i < atts.size(); i++)
+      ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
+      if(img == GetResID(m_CallbackInfo.targetImage))
       {
-        ResourceId img = m_pDriver->GetDebugManager()->GetImageViewInfo(atts[i]).image;
-        if(img == GetResID(m_CallbackInfo.targetImage))
-        {
-          framebufferIndex = i;
-          break;
-        }
+        framebufferIndex = i;
+        break;
       }
     }
+    if(m_CallbackInfo.depthOrStencilImage)
+      framebufferIndex = (uint32_t)atts.size();
+    VkRenderPass newRp = CreateRenderPass(state.renderPass, state.subpass,
+                                          VK_FORMAT_R32G32B32A32_SFLOAT, framebufferIndex);
+
+    VkFramebuffer newFb =
+        CreateFramebuffer(state.renderPass, newRp, state.subpass, state.GetFramebuffer(),
+                          m_CallbackInfo.subImageView, framebufferIndex);
 
     Pipelines pipes = CreatePerFragmentPipelines(curPipeline, newRp, eid, 0, framebufferIndex);
 
@@ -2138,19 +2117,7 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
     // Use the layout of the image we are substituting for.
     if(m_CallbackInfo.depthOrStencilImage)
     {
-      // TODO: what if there is none, of what if it is not color.
-      ResourceId img = m_pDriver->GetDebugManager()
-                           ->GetImageViewInfo(m_pDriver->GetDebugManager()
-                                                  ->GetFramebufferInfo(prevState.GetFramebuffer())
-                                                  .attachments[0]
-                                                  .createdView)
-                           .image;
-
-      // Get the layout of the first framebuffer attachment.
-      VkImageLayout srcImageLayout = m_pDriver->GetDebugManager()->GetImageLayout(
-          img, VK_IMAGE_ASPECT_COLOR_BIT, m_CallbackInfo.targetSubresource.mip,
-          m_CallbackInfo.targetSubresource.slice);
-      colourCopyParams.srcImageLayout = srcImageLayout;
+      colourCopyParams.srcImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
     else
     {
@@ -2397,6 +2364,26 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
       dynState->dynamicStateCount = (uint32_t)dynamicStates.size();
       dynState->pDynamicStates = dynamicStates.data();
     }
+    VkPipelineColorBlendStateCreateInfo *cbs =
+        (VkPipelineColorBlendStateCreateInfo *)pipeCreateInfo.pColorBlendState;
+    // Turn off blending so that we can get shader output values.
+    VkPipelineColorBlendAttachmentState *atts =
+        (VkPipelineColorBlendAttachmentState *)cbs->pAttachments;
+    rdcarray<VkPipelineColorBlendAttachmentState> newAtts;
+    if(framebufferIndex > cbs->attachmentCount)
+    {
+      VkPipelineColorBlendAttachmentState newAtt = {};
+      newAtt.blendEnable = VK_TRUE;
+      newAtt.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+      newAtt.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+      newAtts.resize(cbs->attachmentCount + 1);
+      newAtts.push_back(newAtt);
+      framebufferIndex = (uint32_t)cbs->attachmentCount;
+      cbs->attachmentCount = cbs->attachmentCount + 1;
+      cbs->pAttachments = newAtts.data();
+
+      atts = newAtts.data();
+    }
 
     pipeCreateInfo.renderPass = rp;
 
@@ -2406,11 +2393,6 @@ struct VulkanPixelHistoryPerFragmentCallback : VulkanPixelHistoryCallback
     RDCASSERTEQUAL(vkr, VK_SUCCESS);
     m_PipesToDestroy.push_back(pipes.postModPipe);
 
-    VkPipelineColorBlendStateCreateInfo *cbs =
-        (VkPipelineColorBlendStateCreateInfo *)pipeCreateInfo.pColorBlendState;
-    // Turn off blending so that we can get shader output values.
-    VkPipelineColorBlendAttachmentState *atts =
-        (VkPipelineColorBlendAttachmentState *)cbs->pAttachments;
     for(uint32_t i = 0; i < cbs->attachmentCount; i++)
     {
       if(i == framebufferIndex)
@@ -2785,7 +2767,7 @@ bool VulkanDebugManager::PixelHistorySetupResources(PixelHistoryResources &resou
   }
 
   VkBufferCreateInfo bufferInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bufferInfo.size = AlignUp((uint32_t)(numEvents * sizeof(EventInfo)), 4096U);
+  bufferInfo.size = AlignUp((uint32_t)(numEvents * sizeof(EventInfo) * 10), 4096U);
   bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
   vkr = m_pDriver->vkCreateBuffer(m_Device, &bufferInfo, NULL, &dstBuffer);
